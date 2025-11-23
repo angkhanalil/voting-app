@@ -1,13 +1,127 @@
 
 'use client'
+import { supabase } from '@/lib/supabase-client';
 import { Heart, TrendingUp, Users, Zap } from 'lucide-react';
-import React, { useState } from 'react'
+import React, { useEffect, useState } from 'react'
 
 export default function Vote() {
     const [votes, setVotes] = useState({ teamA: 0, teamB: 0 });
     const [isVoting, setIsVoting] = useState(false);
+    const [isConnected, setIsConnected] = useState(false);
+    const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
+    const [animation, setAnimation] = useState({ teamA: false, teamB: false });
+    const [realtimeEvents, setRealtimeEvents] = useState<string[]>([]);
 
-    const handleVote = async (side: string) => { }
+    useEffect(() => {
+        let mounted = true;
+
+        const setupRealtime = async () => {
+            // Fetch initial data จาก API
+            try {
+                const response = await fetch('/api/votes');
+                const data: Array<{ side: string; count: number }> = await response.json();
+
+                if (data && mounted) {
+                    const votesMap = data.reduce((acc: Record<string, number>, vote: { side: string; count: number }) => {
+                        acc[vote.side] = vote.count;
+                        return acc;
+                    }, {} as Record<string, number>);
+
+                    setVotes({
+                        teamA: votesMap.teamA || 0,
+                        teamB: votesMap.teamB || 0
+                    });
+                }
+            } catch (error) {
+                console.error('Fetch initial data error:', error);
+            }
+
+            // Subscribe to Supabase Real-time (Read-only)
+            const channel = supabase
+                .channel('votes-realtime')
+                .on(
+                    'postgres_changes',
+                    {
+                        event: '*',
+                        schema: 'public',
+                        table: 'Vote'
+                    },
+                    (payload: any) => {
+                        if (!mounted) return;
+
+                        console.log('Real-time update received:', payload);
+
+                        const eventLog = `${new Date().toLocaleTimeString()}: ${payload.eventType} - ${payload.new?.side} = ${payload.new?.count}`;
+                        setRealtimeEvents(prev => [eventLog, ...prev].slice(0, 5));
+
+                        if (payload.new) {
+                            setVotes(prev => ({
+                                ...prev,
+                                [payload.new.side]: payload.new.count
+                            }));
+                            setLastUpdate(new Date());
+                        }
+                    }
+                )
+                .subscribe((status: string) => {
+                    console.log('Subscription status:', status);
+                    if (mounted) {
+                        setIsConnected(status === 'SUBSCRIBED');
+                    }
+                });
+
+            return () => {
+                mounted = false;
+                channel.unsubscribe();
+            };
+        };
+
+        const cleanup = setupRealtime();
+
+        return () => {
+            cleanup.then(cleanupFn => cleanupFn && cleanupFn());
+        };
+    }, []);
+
+    const handleVote = async (side: string) => {
+        if (isVoting || !isConnected) return;
+
+        setIsVoting(true);
+        setAnimation({ ...animation, [side]: true });
+
+        try {
+            // เรียก API แทนการเรียก Supabase โดยตรง
+            const response = await fetch('/api/vote', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ side })
+            });
+
+            const data = await response.json();
+
+            if (!response.ok) {
+                throw new Error(data.error || 'Vote failed');
+            }
+
+            // Real-time จะอัพเดทให้อัตโนมัติ
+
+        } catch (error: any) {
+            console.error('Vote error:', error);
+
+            if (error.message.includes('Too many requests')) {
+                alert('คุณโหวตเร็วเกินไป กรุณารอสักครู่');
+            } else {
+                alert('การโหวตล้มเหลว กรุณาลองใหม่');
+            }
+        }
+
+        setTimeout(() => {
+            setAnimation({ ...animation, [side]: false });
+            setIsVoting(false);
+        }, 300);
+    };
 
     const total = votes.teamA + votes.teamB;
     const percentageA = total > 0 ? (votes.teamA / total) * 100 : 50;
